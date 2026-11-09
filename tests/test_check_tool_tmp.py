@@ -56,6 +56,24 @@ class Python(unittest.TestCase):
                 return d
             """)), 1)
 
+    def test_a_cleanup_passed_to_addcleanup_or_atexit_counts(self):
+        self.assertEqual(py("""\
+            import shutil, tempfile
+            def setUp(self):
+                self.d = tempfile.mkdtemp()
+                self.addCleanup(shutil.rmtree, self.d, True)
+            """), [])
+        self.assertEqual(py("""\
+            import atexit, shutil, tempfile
+            def tmpdir():
+                d = tempfile.mkdtemp()
+                atexit.register(shutil.rmtree, d, True)
+                return d
+            """), [])
+
+    def test_a_cleanup_name_that_is_not_a_cleanup_reference_does_not_count(self):
+        self.assertEqual(len(py("import tempfile\ndef f():\n    d = tempfile.mkdtemp()\n    keep = 'rmtree'\n")), 1)
+
     def test_a_weakref_finalize_is_cleanup(self):
         self.assertEqual(py("""\
             import tempfile, weakref
@@ -74,6 +92,14 @@ class Python(unittest.TestCase):
         self.assertEqual(py("import tempfile\nwith tempfile.NamedTemporaryFile() as f: pass\n"), [])
         self.assertEqual(len(py("import tempfile\nf = tempfile.NamedTemporaryFile(delete=False)\n")), 1)
         self.assertEqual(py("import tempfile\nf = tempfile.NamedTemporaryFile(delete=True)\n"), [])
+
+    def test_a_call_with_dir_is_inside_a_dir_the_caller_owns(self):
+        self.assertEqual(py("import tempfile\ndef f(parent):\n    return tempfile.mkdtemp(dir=parent)\n"), [])
+
+    def test_a_syntax_warning_in_the_checked_file_is_not_printed(self):
+        r = subprocess.run([sys.executable, "-c", "import check_tool_tmp as c; c.check_python('t.py', 'x = \"\\\\w\"\\n')"],
+                           cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
 
     def test_temporary_directory_is_always_fine(self):
         self.assertEqual(py("import tempfile\nwith tempfile.TemporaryDirectory() as d: pass\n"), [])

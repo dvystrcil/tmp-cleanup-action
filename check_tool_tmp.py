@@ -11,8 +11,10 @@ suites and scratch files all failed with ENOSPC while `df -h` still showed free 
       (check_test_tmp.sh). Prints "check-tool-tmp: OK (N files)" and exits 0, else lists each LEAK and exits 1.
 
 Python: each tempfile.mkdtemp(), mkstemp() or NamedTemporaryFile(delete=False) needs, in the same function (or at
-module level, the module), a cleanup call: shutil.rmtree, weakref.finalize, os.remove, os.unlink or Path.unlink.
-TemporaryDirectory() and a deleting NamedTemporaryFile clean up by themselves and always pass.
+module level, the module), a cleanup: shutil.rmtree, weakref.finalize, os.remove, os.unlink or Path.unlink, called or passed on
+(self.addCleanup(shutil.rmtree, d), atexit.register(shutil.rmtree, d)).
+TemporaryDirectory() and a deleting NamedTemporaryFile clean up by themselves and always pass, and so does a call with
+dir=: it makes its temp inside a dir the caller owns, not in the system temp dir.
 
 Shell: `VAR=$(mktemp ...)` needs an `rm` of $VAR somewhere in the file, or of an array $VAR is added to
 (`TMPS+=("$VAR")` ... `rm -f "${TMPS[@]}"`). Best in an EXIT trap, so a failure doesn't leak it, but an rm on the
@@ -22,7 +24,7 @@ needs a trap line that runs rm.
 Either way, a `tmp-kept: <reason>` comment on the call's line or the line above allows it: use it for an output dir
 whose path is handed to the user. The reason is required.
 """
-import argparse, ast, fnmatch, re, subprocess, sys
+import argparse, ast, fnmatch, re, subprocess, sys, warnings
 from typing import NamedTuple
 
 LEAKY = {"mkdtemp", "mkstemp"}
@@ -49,6 +51,7 @@ def _name(call):
 
 def _leaky(call):
     n = _name(call)
+    if any(k.arg == "dir" for k in call.keywords): return False     # inside a dir the caller owns, not the system temp
     if n in LEAKY: return True
     if n == "NamedTemporaryFile":
         return any(k.arg == "delete" and isinstance(k.value, ast.Constant) and k.value.value is False for k in call.keywords)
@@ -56,26 +59,34 @@ def _leaky(call):
 
 
 def _scopes(tree):
-    """[(scope, [calls directly in it])]: each function's own calls (not its nested functions'), and the module's."""
+    """[(scope, [nodes directly in it])]: each function's own nodes (not its nested functions'), and the module's."""
     out = []
-    def collect(node, calls):
+    def collect(node, nodes):
         for ch in ast.iter_child_nodes(node):
             if isinstance(ch, FUNCS):
                 out.append((ch, collect(ch, [])))
             else:
-                if isinstance(ch, ast.Call): calls.append(ch)
-                collect(ch, calls)
-        return calls
+                nodes.append(ch)
+                collect(ch, nodes)
+        return nodes
     out.append((tree, collect(tree, [])))
     return out
+
+
+def _cleanup_ref(node):
+    """shutil.rmtree / os.remove / weakref.finalize ..., called or passed on (addCleanup(shutil.rmtree, d))."""
+    return (isinstance(node, ast.Attribute) and node.attr in CLEANUP) or (isinstance(node, ast.Name) and node.id in CLEANUP)
 
 
 def check_python(path, src):
     lines = src.splitlines()
     found = []
-    for _, calls in _scopes(ast.parse(src, path)):
-        cleans = any(_name(c) in CLEANUP for c in calls)
-        for c in calls:
+    with warnings.catch_warnings():                                  # e.g. SyntaxWarning for a bad escape: not ours
+        warnings.simplefilter("ignore")
+        tree = ast.parse(src, path)
+    for _, nodes in _scopes(tree):
+        cleans = any(_cleanup_ref(x) for x in nodes)
+        for c in (x for x in nodes if isinstance(x, ast.Call)):
             if _leaky(c) and not cleans and not _marked(lines, c.lineno):
                 found.append(Finding(path, c.lineno, lines[c.lineno - 1].strip()))
     return sorted(found, key=lambda f: f.line)
