@@ -68,3 +68,7 @@ bash path/to/check_test_tmp.sh -- npm test     # "check-test-tmp: OK"; leftovers
 ## Releases
 
 Consumers pin `@v1`. Moving `v1` is the release: `gh workflow run release.yaml --repo dvystrcil/tmp-cleanup-action -f bump=patch`.
+
+## License
+
+[MIT](LICENSE)
