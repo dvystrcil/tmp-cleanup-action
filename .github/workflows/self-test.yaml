@@ -1,0 +1,60 @@
+name: Self-test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Unit tests, both scripts
+        run: |
+          set -o pipefail
+          for t in tests/test_check_tool_tmp.py tests/test_check_test_tmp.py; do
+            python3 "$t" 2>&1 | tee "$RUNNER_TEMP/$(basename "$t").log"
+            grep -qE '^Ran [1-9][0-9]* tests' "$RUNNER_TEMP/$(basename "$t").log"
+            grep -qx 'OK' "$RUNNER_TEMP/$(basename "$t").log"          # unittest's verdict; warnings may follow it
+            ! grep -q '^FAILED (' "$RUNNER_TEMP/$(basename "$t").log"
+          done
+
+  # The action on this repo: its own scripts pass the static check, and its own tests leave nothing in TMPDIR.
+  dogfood:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./
+        with:
+          exclude: ""
+          test-command: python3 tests/test_check_tool_tmp.py && python3 tests/test_check_test_tmp.py
+
+  # The action must FAIL on a leak, in both modes: a passing run proves nothing on its own.
+  must-fail:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: A repo with a leaky tool
+        run: |
+          mkdir -p "$RUNNER_TEMP/leaky" && cd "$RUNNER_TEMP/leaky" && git init -q
+          printf 'import tempfile\ndef f():\n    return tempfile.mkdtemp()\n' > tool.py && git add tool.py
+      - id: static
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: ${{ runner.temp }}/leaky
+      - id: runtime
+        continue-on-error: true
+        uses: ./
+        with:
+          tool-check: "false"
+          test-command: mktemp -d
+      - name: Both must have failed
+        run: |
+          echo "static=${{ steps.static.outcome }} runtime=${{ steps.runtime.outcome }}"
+          test "${{ steps.static.outcome }}" = failure
+          test "${{ steps.runtime.outcome }}" = failure

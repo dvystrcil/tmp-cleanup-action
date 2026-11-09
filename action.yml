@@ -1,0 +1,58 @@
+name: tmp-cleanup
+description: >
+  Fail a PR whose code leaves temp files behind. The static check reads every git-tracked .py and .sh: each
+  mkdtemp/mkstemp/NamedTemporaryFile(delete=False) needs a cleanup in the same function, each shell mktemp an rm
+  trap, or a `# tmp-kept: <reason>` marker. Optionally, a test command runs with an empty TMPDIR and anything it
+  leaves fails the check. Leaked temp dirs once used every inode of a laptop's /tmp tmpfs (vt350#90).
+
+inputs:
+  tool-check:
+    description: Run the static check (true/false).
+    default: "true"
+  exclude:
+    description: >
+      Space-separated fnmatch globs (file name or repo path) the static check skips. The default leaves Python unit
+      tests to the test-command run; set it to "" to check everything.
+    default: "test_*.py"
+  test-command:
+    description: >
+      A command to run with an empty TMPDIR (e.g. `npm test` or `python3 -m unittest discover`). Empty: skipped.
+      It must pass, and leave nothing behind.
+    default: ""
+  test-ignore:
+    description: Space-separated globs of entries allowed to remain in TMPDIR (e.g. node-compile-cache).
+    default: ""
+  working-directory:
+    description: Where to run both checks (the repo root by default).
+    default: "."
+
+runs:
+  using: composite
+  steps:
+    - name: Static check (tools)
+      if: inputs.tool-check == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        EXCLUDE: ${{ inputs.exclude }}
+      run: |
+        set -o pipefail
+        args=(--exclude "")
+        for g in $EXCLUDE; do args+=(--exclude "$g"); done
+        python3 "$GITHUB_ACTION_PATH/check_tool_tmp.py" "${args[@]}" | tee "$RUNNER_TEMP/check-tool-tmp.log"
+        grep -qE '^check-tool-tmp: OK \([0-9]+ files\)$' "$RUNNER_TEMP/check-tool-tmp.log"
+
+    - name: Runtime check (tests with an empty TMPDIR)
+      if: inputs.test-command != ''
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        TEST_COMMAND: ${{ inputs.test-command }}
+        TEST_IGNORE: ${{ inputs.test-ignore }}
+      run: |
+        set -o pipefail
+        args=()
+        for g in $TEST_IGNORE; do args+=(--ignore "$g"); done
+        bash "$GITHUB_ACTION_PATH/check_test_tmp.sh" "${args[@]}" -- bash -c "$TEST_COMMAND" 2>&1 \
+          | tee "$RUNNER_TEMP/check-test-tmp.log"
+        grep -qx 'check-test-tmp: OK' "$RUNNER_TEMP/check-test-tmp.log"
